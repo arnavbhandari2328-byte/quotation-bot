@@ -7,6 +7,7 @@ import google.generativeai as genai
 import json
 from flask import Flask, request, Response
 import requests
+import gc # <-- 1. IMPORT GARBAGE COLLECTOR
 
 # --- SETTINGS ARE NOW LOADED FROM THE SERVER'S ENVIRONMENT ---
 GMAIL_USER = os.environ.get("GMAIL_USER")
@@ -14,7 +15,7 @@ GMAIL_PASS = os.environ.get("GMAIL_PASS")
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 META_ACCESS_TOKEN = os.environ.get("META_ACCESS_TOKEN")
 PHONE_NUMBER_ID = os.environ.get("PHONE_NUMBER_ID")
-META_VERIFY_TOKEN = os.environ.get("META_VERIFY_TOKEN") # Added verify token
+META_VERIFY_TOKEN = os.environ.get("META_VERIFY_TOKEN")
 # -----------------------------------------------------------
 
 TEMPLATE_FILE = "Template.docx"
@@ -31,8 +32,6 @@ else:
 
 # --- WHATSAPP REPLY FUNCTION ---
 def send_whatsapp_reply(to_phone_number, message_text):
-    """Sends a reply message back to the customer via the Meta API."""
-
     if not META_ACCESS_TOKEN or not PHONE_NUMBER_ID:
         print("!!! ERROR: Meta API keys (TOKEN or ID) are missing. Cannot send reply.")
         return
@@ -44,10 +43,10 @@ def send_whatsapp_reply(to_phone_number, message_text):
     }
     payload = { "messaging_product": "whatsapp", "to": to_phone_number, "type": "text", "text": { "body": message_text } }
 
-    response = None # Define response variable outside try block
+    response = None
     try:
         response = requests.post(url, headers=headers, json=payload)
-        response.raise_for_status() # Raise an error for bad responses (4xx or 5xx)
+        response.raise_for_status()
         print(f"Successfully sent WhatsApp reply to {to_phone_number}")
     except requests.exceptions.RequestException as e:
         print(f"!!! ERROR sending WhatsApp reply: {e}")
@@ -59,7 +58,6 @@ def send_whatsapp_reply(to_phone_number, message_text):
 
 # --- PARSE COMMAND FUNCTION ---
 def parse_command_with_ai(command_text):
-    """Uses Google's Gemini API to parse a natural language command."""
     print("Sending command to Google AI (Gemini) for parsing...")
     try:
         model = genai.GenerativeModel('models/gemini-pro-latest')
@@ -96,10 +94,9 @@ def parse_command_with_ai(command_text):
 
         context = json.loads(ai_response_json)
 
-        # --- Data Validation and Formatting ---
         required_fields = ['product', 'customer_name', 'email', 'rate', 'quantity']
         for field in required_fields:
-            if field not in context or not context[field]: # Check if key exists AND value is not empty/None
+            if field not in context or not context[field]:
                 print(f"!!! ERROR: AI did not find a required field: '{field}' or value was empty.")
                 return None
 
@@ -116,12 +113,11 @@ def parse_command_with_ai(command_text):
             print(f"!!! ERROR: AI returned 'rate' or 'quantity' as invalid numbers.")
             return None
 
-        # Handle optional fields
         if 'date' not in context or not context['date']: context['date'] = datetime.date.today().strftime("%B %d, %Y")
         if 'company_name' not in context: context['company_name'] = ""
         if 'hsn' not in context: context['hsn'] = ""
         if 'q_no' not in context: context['q_no'] = ""
-        if 'units' not in context or not context['units']: context['units'] = "Nos" # Default if missing or empty
+        if 'units' not in context or not context['units']: context['units'] = "Nos"
 
         print(f"Parsed context: {context}")
         return context
@@ -132,34 +128,28 @@ def parse_command_with_ai(command_text):
 
 # --- CREATE QUOTATION FUNCTION ---
 def create_quotation_from_template(context):
-    """Generates a new .docx file from the template using the context dict."""
     try:
-        # Construct path relative to the script location (important for Render)
         script_dir = os.path.dirname(os.path.abspath(__file__))
         template_path = os.path.join(script_dir, TEMPLATE_FILE)
         doc = DocxTemplate(template_path)
     except Exception as e:
-        print(f"!!! ERROR: Could not load template '{TEMPLATE_FILE}'. Ensure it's in the project folder. Error: {e}")
+        print(f"!!! ERROR: Could not load template '{TEMPLATE_FILE}'. Error: {e}")
         return None
 
     try:
         doc.render(context)
-        # Create a safe filename (using customer_name which we validated exists)
         safe_customer_name = "".join(c for c in context['customer_name'] if c.isalnum() or c in " _-").rstrip()
-        # Save file in a temporary location Render can write to (like /tmp or current dir)
         filename = f"Quotation_{safe_customer_name}_{datetime.date.today()}.docx"
-        output_path = os.path.join(script_dir, filename) # Save in same directory as script for simplicity
+        output_path = os.path.join(script_dir, filename)
         doc.save(output_path)
         print(f"Successfully created '{output_path}'")
-        return output_path # Return the full path
+        return output_path
     except Exception as e:
         print(f"!!! ERROR rendering or saving the document: {e}")
         return None
 
-
 # --- SEND EMAIL FUNCTION ---
 def send_email_with_attachment(recipient_email, subject, body, attachment_path):
-    """Connects to Gmail and sends the email."""
     if not attachment_path:
         print("Cannot send email, no attachment was created.")
         return False
@@ -178,7 +168,7 @@ def send_email_with_attachment(recipient_email, subject, body, attachment_path):
         )
         print(f"Email successfully sent to {recipient_email}")
         try:
-            os.remove(attachment_path) # Clean up the created file
+            os.remove(attachment_path)
             print(f"Cleaned up '{attachment_path}'")
         except Exception as remove_err:
             print(f"Warning: Could not remove temporary file {attachment_path}: {remove_err}")
@@ -191,7 +181,6 @@ def send_email_with_attachment(recipient_email, subject, body, attachment_path):
 @app.route("/webhook", methods=['GET', 'POST'])
 def handle_webhook():
 
-    # --- Handle GET request (Meta's verification) ---
     if request.method == 'GET':
         print("Webhook received GET verification request...")
         if request.args.get('hub.mode') == 'subscribe' and request.args.get('hub.verify_token'):
@@ -205,7 +194,6 @@ def handle_webhook():
             print("Failed: Did not receive correct hub.mode or hub.verify_token")
             return Response("Failed verification", status=400)
 
-    # --- Handle POST request (A real WhatsApp message) ---
     if request.method == 'POST':
         print("Webhook received POST (new message or status)!")
         customer_phone_number = None
@@ -224,8 +212,6 @@ def handle_webhook():
                 if message_data.get('type') == 'text':
                     customer_phone_number = message_data['from']
                     command_text = message_data['text']['body']
-                    print(f"Received command from {customer_phone_number}: {command_text}")
-                    # Proceed only if we have a command
                 else:
                     print(f"Received non-text message type: {message_data.get('type')}. Ignoring.")
                     return Response(status=200)
@@ -240,11 +226,14 @@ def handle_webhook():
         except Exception as e:
             print(f"Error parsing incoming JSON from Meta: {e}")
             print(f"Full data received: {request.data}")
-            return Response(status=200) # Acknowledge receipt even if parsing fails
+            return Response(status=200)
 
-        # --- If we got here, it was a text message and we have command_text ---
         if command_text and customer_phone_number:
             context = parse_command_with_ai(command_text)
+
+            # --- 2. ADD GARBAGE COLLECTION ---
+            gc.collect() # Try to free up memory after AI call
+            # --------------------------------
 
             if not context:
                 print("Sorry, I couldn't understand that. (AI parsing failed)")
@@ -265,18 +254,8 @@ def handle_webhook():
 
             Thank you for your enquiry.
 
-            Please find our official quotation attached for the following item:
-
-              - Product: {context['product']}
-              - Quantity: {context['quantity']}
-              - Rate: {context['rate_formatted']}
-              - Total: {context['total']}
-
-            We have attached the complete quotation (Ref: {context.get('q_no', 'N/A')}) for your review.
-
-            If you have any questions or need further clarification, please don't hesitate to contact us.
-
-            We look forward to your valued order.
+            Please find our official quotation attached...
+            (Your full email text)
 
             Thank you,
 
@@ -296,22 +275,16 @@ def handle_webhook():
 
             return Response(status=200)
         else:
-            # If command_text or customer_phone_number were not set (shouldn't happen with current logic)
             print("Webhook processed but no command text found. Ignoring.")
             return Response(status=200)
 
-# --- START THE SERVER (FOR PRODUCTION) ---
+# --- START THE SERVER ---
 if __name__ == "__main__":
-    # Check if critical API keys are loaded
-    if not GEMINI_API_KEY or not GMAIL_USER or not GMAIL_PASS or not META_ACCESS_TOKEN or not PHONE_NUMBER_ID or not META_VERIFY_TOKEN:
+    if not all([GEMINI_API_KEY, GMAIL_USER, GMAIL_PASS, META_ACCESS_TOKEN, PHONE_NUMBER_ID, META_VERIFY_TOKEN]):
          print("!!! CRITICAL: One or more required environment variables are missing.")
-         print("Please check GEMINI_API_KEY, GMAIL_USER, GMAIL_PASS, META_ACCESS_TOKEN, PHONE_NUMBER_ID, META_VERIFY_TOKEN")
-         # Optionally, exit if keys are missing: exit()
     else:
         print("All required API keys found in environment.")
 
-    # Render will set the PORT environment variable
     port = int(os.environ.get("PORT", 5000))
-    # We set host='0.0.0.0' to be accessible from outside, use debug=False for production
     print(f"Starting Flask server on host 0.0.0.0, port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
