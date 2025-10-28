@@ -1,0 +1,7 @@
+Flask
+google-generativeai
+yagmail
+docxtpl
+openpyxl
+gunicorn
+requests
